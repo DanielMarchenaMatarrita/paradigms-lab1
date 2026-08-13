@@ -1,163 +1,227 @@
-﻿
-using System.Collections.Generic;
-using System.Linq;
-using System.Net.Http;
+using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
-using System.Threading.Tasks;
 using FluentAssertions;
+using HackerRank1.Controllers;
+using HackerRank1.DTO;
 using LibraryService.WebAPI;
 using LibraryService.WebAPI.Data;
-using LibraryService.WebAPI.DTO;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Newtonsoft.Json;
 using Xunit;
 
-namespace LibraryService.Tests
-{    
-    public class IntegrationTests : IClassFixture<WebApplicationFactory<Program>>
+namespace LibraryService.Tests;
+
+public class IntegrationTests : IClassFixture<WebApplicationFactory<Program>>, IDisposable
+{
+    private readonly WebApplicationFactory<Program> application;
+    private readonly LibraryContext context;
+
+    public IntegrationTests(WebApplicationFactory<Program> factory)
     {
-        private readonly WebApplicationFactory<Program> _factory;
-        private readonly LibraryContext context;
+        context = new LibraryContext(new DbContextOptionsBuilder<LibraryContext>()
+            .UseSqlite("DataSource=:memory:")
+            .Options);
+        context.Database.OpenConnection();
 
-        public HttpClient Client { get; private set; }
-
-        public IntegrationTests(WebApplicationFactory<Program> factory)
-        {
-            _factory = factory;
-            context = new LibraryContext(new DbContextOptionsBuilder<LibraryContext>()
-                        .UseSqlite("DataSource=:memory:")
-                        .EnableSensitiveDataLogging()
-                        .Options);
-            Client = _factory.WithWebHostBuilder(builder =>
-                builder.UseStartup<Startup>()
-                .ConfigureServices(services =>
-                {
-                    services.RemoveAll(typeof(LibraryContext));
-                    services.AddSingleton(context);
-
-                    context.Database.OpenConnection();
-                    context.Database.EnsureCreated();
-
-                    context.SaveChanges();
-
-                    // Clear local context cache
-                    foreach (var entity in context.ChangeTracker.Entries().ToList())
-                    {
-                        entity.State = EntityState.Detached;
-                    }
-                })
-            ).CreateClient();
-        }
-
-        private async Task SeedLibrary()
-        {
-            var libraries = new List<Library>
+        application = factory.WithWebHostBuilder(builder =>
+            builder.ConfigureServices(services =>
             {
-                new Library { Name = "Library Name 1", Location = "Location 1" },
-                new Library { Name = "Library Name 2", Location = "Location 2" },
-                new Library { Name = "Library Name 3", Location = "Location 3" },
-                new Library { Name = "Library Name 4", Location = "Location 4" }
-            };
+                services.RemoveAll<LibraryContext>();
+                services.AddSingleton(context);
+            }));
 
-            await context.Libraries.AddRangeAsync(libraries);
-            await context.SaveChangesAsync();  // Save to the database
-        }
+        Client = application.CreateClient();
+    }
 
-        private async Task SeedBook(string bookName, int libraryId)
+    public HttpClient Client { get; }
+
+    [Fact]
+    public async Task Libraries_CanBeListedAndRetrieved()
+    {
+        var emptyResponse = await Client.GetAsync("/api/libraries");
+        emptyResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await ReadBody<List<Library>>(emptyResponse)).Should().BeEmpty();
+
+        var libraries = await SeedLibraries();
+
+        var listResponse = await Client.GetAsync("/api/libraries");
+        listResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await ReadBody<List<Library>>(listResponse)).Should().HaveCount(2);
+
+        var getResponse = await Client.GetAsync($"/api/libraries/{libraries[0].Id}");
+        getResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await ReadBody<Library>(getResponse)).Name.Should().Be("Library 1");
+
+        (await Client.GetAsync("/api/libraries/99999")).StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task LibraryCreation_UsesServerIdAndReturnsCreatedLocation()
+    {
+        var request = new Library { Id = 999, Name = "Created Library", Location = "Created Location" };
+
+        var response = await PostJson("/api/libraries", request);
+
+        response.StatusCode.Should().Be(HttpStatusCode.Created);
+        var created = await ReadBody<Library>(response);
+        created.Id.Should().BePositive().And.NotBe(999);
+        response.Headers.Location.Should().NotBeNull();
+        response.Headers.Location!.ToString().Should().EndWith($"/api/Libraries/{created.Id}");
+        (await context.Libraries.AsNoTracking().SingleAsync()).Id.Should().Be(created.Id);
+    }
+
+    [Fact]
+    public async Task LibraryUpdate_UsesRouteIdAndHandlesMissingLibrary()
+    {
+        var libraries = await SeedLibraries();
+        var routeLibrary = libraries[0];
+        var bodyLibrary = libraries[1];
+
+        var update = new Library
         {
-            var bookForm = new BookForm
-            {
-                Name = bookName
-            };
-            var response1 = await Client.PostAsync($"/api/libraries/{libraryId}/books",
-                new StringContent(JsonConvert.SerializeObject(bookForm), Encoding.UTF8, "application/json"));
-        }
+            Id = bodyLibrary.Id,
+            Name = "Updated by route",
+            Location = "Updated location"
+        };
 
-        // TEST NAME - addBookToLibrary
-        // TEST DESCRIPTION - It adds book to a library
-        [Fact]
-        public async Task TestAddBook_Ok_GetBook_NotFound()
+        var response = await PutJson($"/api/libraries/{routeLibrary.Id}", update);
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        context.ChangeTracker.Clear();
+        var persistedRouteLibrary = await context.Libraries.AsNoTracking().SingleAsync(x => x.Id == routeLibrary.Id);
+        var persistedBodyLibrary = await context.Libraries.AsNoTracking().SingleAsync(x => x.Id == bodyLibrary.Id);
+        persistedRouteLibrary.Name.Should().Be("Updated by route");
+        persistedBodyLibrary.Name.Should().Be("Library 2");
+
+        (await PutJson("/api/libraries/99999", update)).StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task BookCreation_UsesServerAndRouteIdsAndRequiresParent()
+    {
+        var libraries = await SeedLibraries();
+        var request = new Book
         {
-            await SeedLibrary();
+            Id = 999,
+            Name = "Created Book",
+            Category = "Testing",
+            LibraryId = libraries[1].Id
+        };
 
-            var bookForm = new BookForm
-            {
-                Name = "Test book 1",
-            };
+        var response = await PostJson($"/api/libraries/{libraries[0].Id}/books", request);
 
-            var response1 = await Client.PostAsync($"/api/libraries/1/books",
-                new StringContent(JsonConvert.SerializeObject(bookForm), Encoding.UTF8, "application/json"));
+        response.StatusCode.Should().Be(HttpStatusCode.Created);
+        (await response.Content.ReadAsStringAsync()).Should().NotContain("\"library\":");
+        var created = await ReadBody<Book>(response);
+        created.Id.Should().BePositive().And.NotBe(999);
+        created.LibraryId.Should().Be(libraries[0].Id);
 
-            response1.StatusCode.Should().BeEquivalentTo(StatusCodes.Status201Created);
+        var missingResponse = await PostJson("/api/libraries/99999/books", request);
+        missingResponse.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await context.Books.AsNoTracking().CountAsync()).Should().Be(1);
+    }
 
-            bookForm = new BookForm
-            {
-                Name = "Test book 2",
-            };
+    [Fact]
+    public async Task Books_CanBeListedAndMissingParentReturnsNotFound()
+    {
+        var libraries = await SeedLibraries();
+        await SeedBook("Book 1", libraries[0].Id);
+        await SeedBook("Book 2", libraries[0].Id);
+        await Authenticate();
 
-            var response2 = await Client.PostAsync($"/api/libraries/100/books",
-                new StringContent(JsonConvert.SerializeObject(bookForm), Encoding.UTF8, "application/json"));
+        var populatedResponse = await Client.GetAsync($"/api/libraries/{libraries[0].Id}/books");
+        populatedResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var books = await ReadBody<List<Book>>(populatedResponse);
+        books.Should().HaveCount(2).And.OnlyContain(book => book.LibraryId == libraries[0].Id);
 
-            response2.StatusCode.Should().BeEquivalentTo(StatusCodes.Status404NotFound);
-        }
+        var emptyResponse = await Client.GetAsync($"/api/libraries/{libraries[1].Id}/books");
+        emptyResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await ReadBody<List<Book>>(emptyResponse)).Should().BeEmpty();
 
-        // TEST NAME - getBooksInALibrary
-        // TEST DESCRIPTION - It finds all books in a library by ID
-        [Fact]
-        public async Task TestGetBooks_Ok_NotFound()
+        (await Client.GetAsync("/api/libraries/99999/books")).StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task LibraryDeletion_CascadesBooksAndHandlesRepeatedDelete()
+    {
+        var libraries = await SeedLibraries();
+        await SeedBook("Book to delete", libraries[0].Id);
+
+        var response = await Client.DeleteAsync($"/api/libraries/{libraries[0].Id}");
+        response.StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        context.ChangeTracker.Clear();
+        (await context.Libraries.AsNoTracking().AnyAsync(x => x.Id == libraries[0].Id)).Should().BeFalse();
+        (await context.Books.AsNoTracking().AnyAsync(x => x.LibraryId == libraries[0].Id)).Should().BeFalse();
+        (await Client.DeleteAsync($"/api/libraries/{libraries[0].Id}")).StatusCode.Should().Be(HttpStatusCode.NotFound);
+
+        await Authenticate();
+        (await Client.GetAsync($"/api/libraries/{libraries[0].Id}/books")).StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    public void Dispose()
+    {
+        Client.Dispose();
+        application.Dispose();
+        context.Dispose();
+    }
+
+    private async Task<List<Library>> SeedLibraries()
+    {
+        var libraries = new List<Library>
         {
-            await SeedLibrary();
+            new() { Name = "Library 1", Location = "Location 1" },
+            new() { Name = "Library 2", Location = "Location 2" }
+        };
 
-            await SeedBook("test book 1", 1);
-            await SeedBook("test book 2", 1);
+        await context.Libraries.AddRangeAsync(libraries);
+        await context.SaveChangesAsync();
+        context.ChangeTracker.Clear();
+        return libraries;
+    }
 
-            var response1 = await Client.GetAsync($"/api/libraries/2/books");
-            response1.StatusCode.Should().BeEquivalentTo(StatusCodes.Status200OK);
-            var books = JsonConvert.DeserializeObject<IEnumerable<Book>>(response1.Content.ReadAsStringAsync().Result).ToList();
-            books.Count.Should().Be(0);
-
-            var response2 = await Client.GetAsync($"/api/libraries/1/books");
-            response2.StatusCode.Should().BeEquivalentTo(StatusCodes.Status200OK);
-            var books2 = JsonConvert.DeserializeObject<IEnumerable<Book>>(response2.Content.ReadAsStringAsync().Result).ToList();
-            books2.Count.Should().Be(2);
-
-            var response3 = await Client.GetAsync($"/api/libraries/31232/books");
-            response3.StatusCode.Should().BeEquivalentTo(StatusCodes.Status404NotFound);
-        }
-
-        // TEST NAME - deleteLibraryById
-        // TEST DESCRIPTION - Check delete library web api end point
-        [Fact]
-        public async Task TestDeleteLibrary()
+    private async Task SeedBook(string name, int libraryId)
+    {
+        await context.Books.AddAsync(new Book
         {
-            await SeedLibrary();
+            Name = name,
+            Category = "Testing",
+            LibraryId = libraryId
+        });
+        await context.SaveChangesAsync();
+        context.ChangeTracker.Clear();
+    }
 
-            var bookForm = new BookForm
-            {
-                Name = "test book 1",
-            };
+    private async Task Authenticate()
+    {
+        var response = await PostJson("/login", new User
+        {
+            Email = "admin",
+            Password = "1234",
+            Role = "admin"
+        });
+        response.EnsureSuccessStatusCode();
+        var token = await ReadBody<TokenResponse>(response);
+        Client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.token);
+    }
 
-            // add book to library
-            var response0 = await Client.PostAsync("/api/libraries/1/books",
-                new StringContent(JsonConvert.SerializeObject(bookForm), Encoding.UTF8, "application/json"));
-            response0.StatusCode.Should().BeEquivalentTo(StatusCodes.Status201Created);
+    private Task<HttpResponseMessage> PostJson<T>(string path, T value) =>
+        Client.PostAsync(path, JsonContent(value));
 
-            // delete library
-            var response1 = await Client.DeleteAsync("/api/libraries/1");
-            response1.StatusCode.Should().BeEquivalentTo(StatusCodes.Status204NoContent);
+    private Task<HttpResponseMessage> PutJson<T>(string path, T value) =>
+        Client.PutAsync(path, JsonContent(value));
 
-            // Verify that delete is successful
-            var response2 = await Client.GetAsync("/api/libraries/1/books");
-            response2.StatusCode.Should().BeEquivalentTo(StatusCodes.Status404NotFound);
+    private static StringContent JsonContent<T>(T value) =>
+        new(JsonConvert.SerializeObject(value), Encoding.UTF8, "application/json");
 
-            var response3 = await Client.DeleteAsync("/api/libraries/1");
-            response3.StatusCode.Should().BeEquivalentTo(StatusCodes.Status404NotFound);
-        }
+    private static async Task<T> ReadBody<T>(HttpResponseMessage response)
+    {
+        var content = await response.Content.ReadAsStringAsync();
+        return JsonConvert.DeserializeObject<T>(content)!;
     }
 }

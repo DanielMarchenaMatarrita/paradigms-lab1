@@ -15,6 +15,11 @@ obj/
 # Visual Studio Code
 .vscode/
 
+# Local AI tooling
+.agents/
+.github/
+.opencode/
+
 # NuGet packages (if you store them locally)
 *.nupkg
 packages/
