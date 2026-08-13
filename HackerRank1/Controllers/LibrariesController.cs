@@ -1,10 +1,6 @@
-﻿using System.Linq;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using LibraryService.WebAPI.Data;
 using LibraryService.WebAPI.Services;
-using System;
-using Microsoft.AspNetCore.Authorization;
 
 namespace LibraryService.WebAPI.Controllers
 {
@@ -36,10 +32,11 @@ namespace LibraryService.WebAPI.Controllers
         }
 
         [HttpPost]        
-        public async Task<IActionResult> Add(Library l)
+        public async Task<IActionResult> Add(Library library)
         {
-            await _librariesService.Add(l);
-            return Ok(l);
+            library.Id = 0;
+            var createdLibrary = await _librariesService.Add(library);
+            return CreatedAtAction(nameof(Get), new { libraryId = createdLibrary.Id }, createdLibrary);
         }
 
         [HttpPut("{libraryId}")]
@@ -49,10 +46,20 @@ namespace LibraryService.WebAPI.Controllers
             if (existingLibrary == null)
                 return NotFound();
 
+            library.Id = libraryId;
             await _librariesService.Update(library);
             return NoContent();
         }
 
-        // Implement the DELETE method below
+        [HttpDelete("{libraryId}")]
+        public async Task<IActionResult> Delete(int libraryId)
+        {
+            var library = (await _librariesService.Get(new[] { libraryId })).FirstOrDefault();
+            if (library == null)
+                return NotFound();
+
+            await _librariesService.Delete(library);
+            return NoContent();
+        }
     }
 }

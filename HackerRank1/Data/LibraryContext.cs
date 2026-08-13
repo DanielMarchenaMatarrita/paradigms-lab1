@@ -1,4 +1,5 @@
 ﻿using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 
 namespace LibraryService.WebAPI.Data
@@ -23,7 +24,8 @@ namespace LibraryService.WebAPI.Data
         public string Category { get; set; }
 
         public int LibraryId { get; set; }
-        public virtual Library Library { get; set; }
+        [JsonIgnore]
+        public virtual Library? Library { get; set; }
     }
 
     public class Library

@@ -1,5 +1,3 @@
-using System.Linq;
-using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using LibraryService.WebAPI.Data;
 using LibraryService.WebAPI.Services;
@@ -24,8 +22,27 @@ namespace LibraryService.WebAPI.Controllers
         [Authorize]
         public async Task<IActionResult> GetAll(int libraryId)
         {
+            var library = (await _librariesService.Get(new[] { libraryId })).FirstOrDefault();
+            if (library == null)
+                return NotFound();
+
             var books = await _booksService.Get(libraryId, null);
             return Ok(books);
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> Add(int libraryId, Book book)
+        {
+            var library = (await _librariesService.Get(new[] { libraryId })).FirstOrDefault();
+            if (library == null)
+                return NotFound();
+
+            book.Id = 0;
+            book.LibraryId = libraryId;
+            book.Library = library;
+
+            var createdBook = await _booksService.Add(book);
+            return StatusCode(StatusCodes.Status201Created, createdBook);
         }
     }
 }

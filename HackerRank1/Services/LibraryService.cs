@@ -16,7 +16,7 @@ namespace LibraryService.WebAPI.Services
             _libraryContext = libraryContext;
         }
 
-        public async Task<IEnumerable<Library>> Get(int[] ids)
+        public async Task<IEnumerable<Library>> Get(int[]? ids)
         {
             var projects = _libraryContext.Libraries.AsQueryable();
 
@@ -54,14 +54,14 @@ namespace LibraryService.WebAPI.Services
 
         public async Task<bool> Delete(Library library)
         {
-            // Complete the implementation
-            throw new NotImplementedException();
+            _libraryContext.Libraries.Remove(library);
+            return await _libraryContext.SaveChangesAsync() > 0;
         }
     }
 
     public interface ILibrariesService
     {
-        Task<IEnumerable<Library>> Get(int[] ids);
+        Task<IEnumerable<Library>> Get(int[]? ids);
 
         Task<Library> Add(Library library);
 
